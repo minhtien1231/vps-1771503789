@@ -1,0 +1,123 @@
+name: Create VPS (Auto Restart)
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [create-vps]
+
+env:
+  VPS_NAME: vps-1771503789
+  GITHUB_TOKEN_VPS: ${{ secrets.GH_TOKEN }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+    - name: ⬇️ Checkout
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GH_TOKEN }}
+
+    - name: 📁 Tạo VPS info
+      run: |
+        mkdir -p links
+        echo "VPS khởi tạo - $(date '+%Y-%m-%d %H:%M:%S')" > "links/vps-1771503789.txt"
+
+    - name: 🌐 Cài curl nếu chưa có
+      run: |
+        if ! command -v curl &>/dev/null; then
+          echo "📥 Cài curl..."
+          if   command -v apt-get &>/dev/null; then sudo apt-get update -qq && sudo apt-get install -y curl
+          elif command -v yum     &>/dev/null; then sudo yum install -y curl
+          elif command -v apk     &>/dev/null; then sudo apk add --no-cache curl
+          else echo "❌ Không tìm thấy package manager" && exit 1
+          fi
+        fi
+        echo "✅ curl: $(curl --version | head -1)"
+
+    - name: 🚀 Chạy sshx và lấy link
+      run: |
+        set -euo pipefail
+
+        echo "🚀 Khởi động sshx..."
+        # Chạy sshx, capture toàn bộ output
+        curl -sSf https://sshx.io/get | sh -s -- -q 2>&1 | tee /tmp/sshx_raw.log &
+        SSHX_BG=$!
+
+        REMOTE_LINK=""
+        echo "⏳ Đợi sshx in link..."
+        for i in $(seq 1 90); do
+          sleep 2
+          # Tìm link dạng https://sshx.io/s#...
+          LINK=$(grep -oE 'https://sshx[.]io/s[#][A-Za-z0-9_+=/-]+' /tmp/sshx_raw.log 2>/dev/null | head -1 || true)
+          if [ -n "$LINK" ]; then
+            REMOTE_LINK="$LINK"
+            echo "✅ Link tìm thấy: $REMOTE_LINK"
+            break
+          fi
+          echo "  ($i/90) chưa có link, log hiện tại:"
+          cat /tmp/sshx_raw.log 2>/dev/null || true
+          echo "---"
+        done
+
+        if [ -z "$REMOTE_LINK" ]; then
+          echo "⚠️ Không lấy được link sshx sau 3 phút"
+          echo "  Full log:"
+          cat /tmp/sshx_raw.log || true
+          REMOTE_LINK="SSHX_FAILED_$(date '+%Y%m%d_%H%M%S')"
+        fi
+
+        echo "$REMOTE_LINK" > remote-link.txt
+        echo "📄 remote-link.txt: $(cat remote-link.txt)"
+
+        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git config --global user.name "github-actions[bot]"
+        git add remote-link.txt links/
+        git commit -m "🔗 remote-link.txt - $(date '+%Y-%m-%d %H:%M:%S')" --allow-empty
+        git push origin main --force-with-lease
+        echo "✅ Đã commit link"
+
+    - name: ⏱️ Giữ session sống (330 phút)
+      run: |
+        mkdir -p .backup
+        TOTAL=330
+        BACKUP_EVERY=60
+
+        for i in $(seq 1 $TOTAL); do
+          echo "🟢 Phút $i/$TOTAL - $(date '+%H:%M:%S')"
+
+          if [ $((i % BACKUP_EVERY)) -eq 0 ]; then
+            echo "💾 Backup phút $i..."
+            zip -qr ".backup/vps-1771503789_$(date '+%Y%m%d_%H%M').zip" links/ remote-link.txt 2>/dev/null || true
+            git add .backup/
+            git commit -m "💾 Backup phút $i" --allow-empty
+            git push origin main --force-with-lease || true
+          fi
+
+          sleep 60
+        done
+        echo "⏰ Session xong."
+
+    - name: 🔄 Auto Restart
+      if: always()
+      run: |
+        CURRENT_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+        echo "RESTART_$(date '+%Y%m%d_%H%M%S')" > restart.lock
+
+        curl -sf -X POST "https://api.github.com/repos/minhtien1231/vps-1771503789/dispatches" \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer $GITHUB_TOKEN_VPS" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          -d '{"event_type":"create-vps","client_payload":{"vps_name":"vps-1771503789","restart_time":"'"$CURRENT_TIME"'","auto_restart":true}}' \
+          && echo "✅ Restart triggered" || echo "❌ Restart failed"
+
+        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git config --global user.name "github-actions[bot]"
+        git add restart.lock
+        git commit -m "🔄 Auto restart - $CURRENT_TIME" --allow-empty
+        git push origin main --force-with-lease || true
